@@ -58,6 +58,8 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/ui/login)
           [ "$code" = "200" ] || { echo "expected the UI login page, got $code"; docker logs mcpm; exit 1; }
           test "$(docker exec mcpm id -u)" != "0" || { echo "container runs as root"; exit 1; }
+          # runtime dependencies that are imported lazily must be present in the image
+          docker exec mcpm python -c "import apprise, uptime_kuma_api, mcpmonitor.notify, mcpmonitor.kuma, mcpmonitor.ingest"
           docker rm -f mcpm
 
   build:

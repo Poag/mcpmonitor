@@ -13,6 +13,7 @@ dependencies = [
     "mcp>=2.2,<3",
     "httpx>=0.27",
     "uptime-kuma-api2>=2.9,<3",
+    "apprise>=1.9,<3",
 ]
 
 [project.optional-dependencies]
