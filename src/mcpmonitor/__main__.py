@@ -6,9 +6,12 @@ import asyncio
 import logging
 import sys
 
+from .actions import ActionService
 from .backends.dockhand import DockhandBackend
 from .config import ConfigError, Settings
+from .kuma import UptimeKumaClient
 from .server import build_http_app, build_server
+from .store import Store
 
 
 async def _run(settings: Settings) -> None:
@@ -18,8 +21,18 @@ async def _run(settings: Settings) -> None:
         verify_tls=settings.dockhand_verify_tls,
         timeout=settings.dockhand_timeout,
     )
-    mcp = build_server(settings, backend)
+    store = Store(settings.db_path)
+    kuma = (
+        UptimeKumaClient(settings.kuma_url, settings.kuma_username, settings.kuma_password)
+        if settings.kuma_url
+        else None
+    )
+    actions = ActionService(settings, backend, store, kuma)
+    mcp = build_server(settings, backend, store, kuma, actions)
     try:
+        resumed = await actions.reconcile()
+        if resumed:
+            logging.getLogger("mcpmonitor").warning("resumed %d Kuma monitor(s) left paused", len(resumed))
         if settings.transport == "stdio":
             await mcp.run_stdio_async()
         else:
@@ -30,6 +43,9 @@ async def _run(settings: Settings) -> None:
             await uvicorn.Server(config).serve()
     finally:
         await backend.aclose()
+        if kuma is not None:
+            await kuma.aclose()
+        store.close()
 
 
 def main() -> None:

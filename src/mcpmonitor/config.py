@@ -35,6 +35,17 @@ class Settings:
     http_port: int = 8765
     auth_token: str = ""  # bearer token required on the HTTP transport
 
+    # Uptime Kuma (optional)
+    kuma_url: str = ""
+    kuma_username: str = ""
+    kuma_password: str = ""
+
+    # Actions (restart/start/stop). Off unless explicitly enabled.
+    enable_actions: bool = False
+    actions_per_hour: int = 3
+    settle_timeout: float = 90.0  # how long to wait for a container to be running/healthy again
+    settle_grace: float = 15.0  # extra wait after recovery before Kuma monitors are resumed
+
     # Storage
     data_dir: Path = field(default_factory=lambda: Path("/data"))
 
@@ -54,6 +65,13 @@ class Settings:
             http_host=os.environ.get("MCPM_HTTP_HOST", "0.0.0.0"),
             http_port=_int("MCPM_HTTP_PORT", 8765),
             auth_token=os.environ.get("MCPM_AUTH_TOKEN", ""),
+            kuma_url=os.environ.get("MCPM_KUMA_URL", "").rstrip("/"),
+            kuma_username=os.environ.get("MCPM_KUMA_USERNAME", ""),
+            kuma_password=os.environ.get("MCPM_KUMA_PASSWORD", ""),
+            enable_actions=os.environ.get("MCPM_ENABLE_ACTIONS", "false").lower() in ("1", "true", "yes"),
+            actions_per_hour=_int("MCPM_ACTIONS_PER_HOUR", 3),
+            settle_timeout=float(os.environ.get("MCPM_SETTLE_TIMEOUT", "90")),
+            settle_grace=float(os.environ.get("MCPM_SETTLE_GRACE", "15")),
             data_dir=Path(os.environ.get("MCPM_DATA_DIR", "/data")),
             log_max_lines=_int("MCPM_LOG_MAX_LINES", 2000),
             log_max_bytes=_int("MCPM_LOG_MAX_BYTES", 65536),
@@ -61,11 +79,17 @@ class Settings:
         s.validate()
         return s
 
+    @property
+    def db_path(self) -> Path:
+        return self.data_dir / "mcpmonitor.db"
+
     def validate(self) -> None:
         if self.transport not in ("stdio", "http"):
             raise ConfigError(f"MCPM_TRANSPORT must be 'stdio' or 'http', got {self.transport!r}")
         if not self.dockhand_url:
             raise ConfigError("MCPM_DOCKHAND_URL is required (e.g. http://10.11.12.3:3003)")
+        if self.kuma_url and not (self.kuma_username and self.kuma_password):
+            raise ConfigError("MCPM_KUMA_USERNAME and MCPM_KUMA_PASSWORD are required with MCPM_KUMA_URL")
         if self.transport == "http" and not self.auth_token:
             raise ConfigError(
                 "MCPM_AUTH_TOKEN is required for the HTTP transport (refusing to start unauthenticated)"

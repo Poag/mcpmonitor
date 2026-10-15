@@ -4,6 +4,9 @@ Routes and shapes were read from Dockhand's source (Finsys/dockhand, src/routes/
 have not yet been exercised against a live instance. Dockhand addresses hosts as numeric "environments"
 (``?env=<id>``); this backend lets callers use the environment name or id interchangeably.
 
+The restart route (``POST /api/containers/{id}/restart?env=``, returns ``{"success": true}``) was read
+directly; start and stop were assumed to share its shape (their route directories exist but were not read).
+
 Auth: ``Authorization: Bearer dh_...``. Dockhand's own docs/code describe API tokens (``dh_`` prefix) but the
 exact header handling was not visible in the files read, so Bearer is an assumption to confirm.
 Dockhand tokens carry no scopes (they act as their owning user), so mcpmonitor's own allowlist is the
@@ -66,15 +69,18 @@ class DockhandBackend:
         except ValueError as exc:
             raise BackendError("Dockhand returned a non-JSON response") from exc
 
-    async def _env_id(self, host: str) -> int:
+    async def resolve_host(self, host: str) -> HostInfo:
         """Resolve a host given as environment name or numeric id."""
         hosts = await self.list_hosts()
         needle = str(host).strip().lower()
         for h in hosts:
             if h.id == needle or h.name.lower() == needle:
-                return int(h.id)
+                return h
         known = ", ".join(f"{h.name} ({h.id})" for h in hosts) or "none"
         raise NotFoundError(f"Unknown host {host!r}. Known hosts: {known}")
+
+    async def _env_id(self, host: str) -> int:
+        return int((await self.resolve_host(host)).id)
 
     # -- Backend interface -----------------------------------------------------------------------
 
@@ -127,6 +133,14 @@ class DockhandBackend:
         if not isinstance(logs, str):
             raise BackendError("Unexpected logs response")
         return logs
+
+    async def container_action(self, host: str, container: str, action: str) -> None:
+        if action not in ("restart", "start", "stop"):
+            raise BackendError(f"Unsupported action {action!r}")
+        env = await self._env_id(host)
+        data = await self._request("POST", f"/api/containers/{_seg(container)}/{action}", params={"env": env})
+        if isinstance(data, dict) and data.get("success") is False:
+            raise BackendError(f"Dockhand reported {action} failed: {data.get('error', '')}")
 
 
 def _seg(container: str) -> str:

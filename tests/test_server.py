@@ -87,3 +87,50 @@ def test_http_auth_middleware(make_backend):
         assert client.post("/mcp", json={}, headers={"Authorization": "Basic s3cret"}).status_code == 401
         ok = client.post("/mcp", json={}, headers={"Authorization": "Bearer s3cret"})
         assert ok.status_code != 401
+
+
+async def test_action_and_kuma_tools_hidden_unless_enabled(make_backend, settings):
+    mcp = build_server(settings, make_backend())
+    names = {t.name for t in await mcp.list_tools()}
+    assert not names & {"restart_container", "list_monitors", "recent_audit"}
+
+
+async def test_action_tools_registered_when_enabled(make_backend):
+    from mcpmonitor.actions import ActionService
+    from mcpmonitor.store import Store
+
+    from .fakes import FakeBackend, FakeKuma
+
+    s = Settings(dockhand_url="http://x", enable_actions=True, settle_grace=0, settle_timeout=1)
+    events: list[str] = []
+    store, backend = Store(":memory:"), FakeBackend(events)
+    kuma = FakeKuma(events, [])
+    mcp = build_server(s, backend, store, kuma, ActionService(s, backend, store, kuma))
+    tools = {t.name: t for t in await mcp.list_tools()}
+    for name in ("restart_container", "start_container", "stop_container"):
+        assert tools[name].annotations.destructive_hint is True
+    assert {"list_monitors", "monitor_history", "diagnose_monitor", "recent_audit"} <= set(tools)
+    with pytest.raises(ToolError, match="not allowed"):
+        await mcp.call_tool("restart_container", {"host": "Unraid", "container": "buffarr"})
+
+
+async def test_diagnose_monitor_joins_kuma_and_container_evidence():
+    from mcpmonitor.kuma import KumaMonitor
+    from mcpmonitor.store import Store
+
+    from .fakes import FakeBackend, FakeKuma
+
+    s = Settings(dockhand_url="http://x")
+    events: list[str] = []
+    store, backend = Store(":memory:"), FakeBackend(events)
+    await store.set_mapped(10, "web", [("Unraid", "buffarr")])
+    kuma = FakeKuma(events, [KumaMonitor(10, "web", "http", True)])
+    mcp = build_server(s, backend, store, kuma)
+    data = payload(await mcp.call_tool("diagnose_monitor", {"monitor_id": 10}))
+    assert data["history"]["changes"][-1]["status"] == "down"
+    assert "token=***" in data["history"]["changes"][-1]["msg"]
+    c = data["containers"][0]
+    assert c["inspect"]["restart_count"] == 2
+    assert "connection refused" in c["error_like_logs"]["logs"]
+    listed = payload(await mcp.call_tool("list_monitors", {}))
+    assert listed[0]["mapping"] == "mapped" and listed[0]["status"] == "down"
