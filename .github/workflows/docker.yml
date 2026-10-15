@@ -1,12 +1,15 @@
 name: Docker
 
-# Publishes ghcr.io/<owner>/mcpmonitor for linux/amd64 and linux/arm64.
-# Each architecture is built on a native runner (no QEMU) and the two images are merged into one manifest.
-# Runs on pushes to main, version tags, manually, and monthly to pick up base image security updates.
+# Builds ghcr.io/<owner>/mcpmonitor for linux/amd64 and linux/arm64, each on a native runner (no QEMU), and
+# publishes a merged multi-arch manifest.
+#
+# - Every push to any branch: build both architectures and smoke-test the container (nothing is published).
+# - Push to main, v* tags, the monthly schedule, or a manual run: after the smoke test passes, publish.
+#   The monthly run rebuilds uncached on a fresh base image to pick up security updates.
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
     tags: ["v*"]
   schedule:
     - cron: "17 4 1 * *"
@@ -17,32 +20,58 @@ env:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - run: pip install -e ".[dev]"
-      - run: ruff check .
-      - run: pytest
-
-  build:
-    needs: test
+  smoke:
     strategy:
       fail-fast: true
       matrix:
         include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-            suffix: amd64
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            suffix: arm64
+          - { platform: linux/amd64, runner: ubuntu-latest }
+          - { platform: linux/arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: mcpmonitor:smoke
+          pull: true
+          no-cache: ${{ github.event_name == 'schedule' }}
+      - name: Smoke test the container
+        run: |
+          docker run -d --name mcpm -p 8765:8765 \
+            -e MCPM_DOCKHAND_URL=http://127.0.0.1:9 -e MCPM_AUTH_TOKEN=smoke -e MCPM_UI_PASSWORD=smoke \
+            mcpmonitor:smoke
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8765/healthz; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then docker logs mcpm; exit 1; fi
+          echo
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8765/mcp)
+          [ "$code" = "401" ] || { echo "expected 401 without a token, got $code"; docker logs mcpm; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/ui/login)
+          [ "$code" = "200" ] || { echo "expected the UI login page, got $code"; docker logs mcpm; exit 1; }
+          test "$(docker exec mcpm id -u)" != "0" || { echo "container runs as root"; exit 1; }
+          docker rm -f mcpm
+
+  build:
+    needs: smoke
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name != 'push'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { platform: linux/amd64, runner: ubuntu-latest, suffix: amd64 }
+          - { platform: linux/arm64, runner: ubuntu-24.04-arm, suffix: arm64 }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +87,6 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          # Fresh base image and no layer cache, so scheduled rebuilds actually pick up security fixes.
           pull: true
           no-cache: ${{ github.event_name == 'schedule' }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
@@ -77,6 +105,9 @@ jobs:
   merge:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/download-artifact@v4
         with:
