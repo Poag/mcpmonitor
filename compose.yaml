@@ -1,0 +1,15 @@
+# Pull-only stack (Dockhand-compatible, plain Compose Specification).
+# Set the values below in the stack's environment, not in this file.
+services:
+  mcpmonitor:
+    image: ghcr.io/poag/mcpmonitor:latest
+    container_name: mcpmonitor
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      MCPM_DOCKHAND_URL: ${MCPM_DOCKHAND_URL:?set to your Dockhand URL, e.g. http://10.11.12.3:3003}
+      MCPM_DOCKHAND_TOKEN: ${MCPM_DOCKHAND_TOKEN:?Dockhand API token (dh_...) for a dedicated user}
+      MCPM_AUTH_TOKEN: ${MCPM_AUTH_TOKEN:?bearer token MCP clients must send}
+    volumes:
+      - ./data:/data
