@@ -90,7 +90,9 @@ async def test_ui_pages(env, monkeypatch):
         assert await svc.faults.list_faults(since=0, status="acked")
 
         patterns = c.get("/ui/patterns").text
-        assert "weird failure code" in patterns and "dev sdb, sector" not in patterns  # lines matched by a rule are hidden
+        assert (
+            "weird failure code" in patterns and "dev sdb, sector" not in patterns
+        )  # lines matched by a rule are hidden
 
         prev = c.post(
             "/ui/rules/preview",
