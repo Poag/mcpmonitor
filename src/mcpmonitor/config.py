@@ -34,6 +34,7 @@ class Settings:
     http_host: str = "0.0.0.0"
     http_port: int = 8765
     auth_token: str = ""  # bearer token required on the HTTP transport
+    ui_password: str = ""  # enables the web UI at /ui when set (HTTP transport only)
 
     # Uptime Kuma (optional)
     kuma_url: str = ""
@@ -65,6 +66,7 @@ class Settings:
             http_host=os.environ.get("MCPM_HTTP_HOST", "0.0.0.0"),
             http_port=_int("MCPM_HTTP_PORT", 8765),
             auth_token=os.environ.get("MCPM_AUTH_TOKEN", ""),
+            ui_password=os.environ.get("MCPM_UI_PASSWORD", ""),
             kuma_url=os.environ.get("MCPM_KUMA_URL", "").rstrip("/"),
             kuma_username=os.environ.get("MCPM_KUMA_USERNAME", ""),
             kuma_password=os.environ.get("MCPM_KUMA_PASSWORD", ""),

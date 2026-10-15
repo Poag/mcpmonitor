@@ -128,6 +128,11 @@ def build_server(
             rows = await store.recent_audit(max(1, min(limit, 200)))
             return [{**r, "args": redact_text(r["args"])} for r in rows]
 
+    if settings.ui_password and store is not None:
+        from .web import register_ui
+
+        register_ui(mcp, settings, backend, store, kuma)
+
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(request: Request) -> Response:
         return JSONResponse({"status": "ok", "version": __version__})
@@ -296,7 +301,9 @@ class BearerAuthMiddleware:
         self._token = token.encode()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope.get("path") == "/healthz":
+        path = scope.get("path", "")
+        # /ui has its own password login; everything else (the MCP endpoint) needs the bearer token
+        if scope["type"] != "http" or path == "/healthz" or path == "/ui" or path.startswith("/ui/"):
             await self.app(scope, receive, send)
             return
         supplied = b""
