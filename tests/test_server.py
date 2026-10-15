@@ -19,8 +19,17 @@ def payload(result):
 async def test_tools_registered_and_all_read_only(make_backend, settings):
     mcp = build_server(settings, make_backend())
     tools = await mcp.list_tools()
-    assert {t.name for t in tools} == {"list_hosts", "list_containers", "inspect_container", "container_logs"}
-    assert all(t.annotations and t.annotations.read_only_hint for t in tools)
+    assert {t.name for t in tools} == {
+        "list_hosts",
+        "list_containers",
+        "inspect_container",
+        "container_logs",
+        "check_updates",
+    }
+    # everything but check_updates (which refreshes Dockhand's own cache) is strictly read-only
+    assert all(t.annotations and t.annotations.read_only_hint for t in tools if t.name != "check_updates")
+    check = next(t for t in tools if t.name == "check_updates")
+    assert check.annotations.destructive_hint is False
 
 
 async def test_list_containers_filters(make_backend, settings):
@@ -132,3 +141,12 @@ async def test_diagnose_monitor_joins_kuma_and_container_evidence():
     assert "connection refused" in c["error_like_logs"]["logs"]
     listed = payload(await mcp.call_tool("list_monitors", {}))
     assert listed[0]["mapping"] == "mapped" and listed[0]["status"] == "down"
+
+
+async def test_check_updates_tool_hides_management_containers(make_backend, settings):
+    from .fakes import FakeBackend
+
+    mcp = build_server(settings, FakeBackend([]))
+    data = payload(await mcp.call_tool("check_updates", {"host": "Unraid"}))
+    assert [d["container"] for d in data] == ["buffarr"]
+    assert data[0]["update_available"] is True

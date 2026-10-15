@@ -8,8 +8,8 @@ systems; see the notes on what is untested below.
 
 | Area | Tools / features |
 | --- | --- |
-| Containers (via Dockhand) | `list_hosts`, `list_containers`, `inspect_container`, `container_logs` (tail, since, regex; size-limited, redacted) |
-| Actions (off by default) | `restart_container`, `start_container`, `stop_container`: only for allowlisted containers, rate limited, `dry_run`, audited. Mapped Uptime Kuma monitors are paused first and resumed after the container is healthy again |
+| Containers (via Dockhand) | `list_hosts`, `list_containers`, `inspect_container`, `container_logs` (tail, since, regex; size-limited, redacted), `check_updates` (images with a newer digest; informational) |
+| Actions (off by default) | `restart_container`, `start_container`, `stop_container`, `update_container` (pull and recreate through Dockhand): only for allowlisted containers, rate limited, `dry_run`, audited. Mapped Uptime Kuma monitors are paused first and resumed after the container is healthy again |
 | Uptime Kuma | `list_monitors`, `monitor_history`, `diagnose_monitor` (Kuma status plus container state and error-like log lines) |
 | Faults | `list_faults`, `hardware_health`, `search_syslog`: disk, I/O, filesystem, array, memory, network and temperature faults from syslog and Unraid notifications |
 | Alerts | Faults go to targets you configure in the UI through [Apprise](https://github.com/caronc/apprise) (Discord, ntfy, email and many more), whether or not an AI session is running |
@@ -80,7 +80,7 @@ paths), the syslog receiver over real UDP/TCP sockets, rules, the UI flows, and 
 local server. **Not yet tried against live systems:** Dockhand (routes and shapes were read from its source; the
 Bearer header for API tokens is assumed, and `start`/`stop` routes are assumed to match `restart`), Uptime Kuma 2.5.6
 (the client library documents live tests up to 2.5.0), Unraid's actual syslog and notification behaviour, and Apprise
-delivery. Expect small fixes on first contact. Image updates (apply_update) are not implemented yet.
+delivery. Expect small fixes on first contact. `update_container` records the previous image reference so a rollback is possible, but there is no automatic rollback.
 
 ## Development
 

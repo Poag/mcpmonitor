@@ -124,6 +124,18 @@ def build_server(
     if kuma is not None:
         _register_kuma_tools(mcp, backend, store, kuma, settings, guard)
 
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True))
+    async def check_updates(host: str, refresh: bool = True) -> list[dict[str, Any]]:
+        """Containers on a host with an image update available (digest comparison). refresh=true re-checks the
+        registries through Dockhand (which also refreshes its own pending-updates list); false reads its cache.
+        Informational only: nothing is updated. Dockhand's own and Hawser containers are never offered."""
+        found = await guard(backend.check_updates(host, refresh=refresh))
+        return [
+            {k: v for k, v in asdict(u).items() if v not in ("", None, False)} | {"update_available": True}
+            for u in found
+            if not u.system
+        ]
+
     if actions is not None and settings.enable_actions:
         _register_action_tools(mcp, actions)
 
@@ -276,6 +288,13 @@ def _register_action_tools(mcp: MCPServer, actions: ActionService) -> None:
     async def start_container(host: str, container: str, dry_run: bool = False, reason: str = "") -> dict[str, Any]:
         """Start an allowlisted stopped container (same Kuma pause/resume behaviour as restart)."""
         return await go("start", host, container, dry_run, reason)
+
+    @mcp.tool(annotations=ACTION_TOOL)
+    async def update_container(host: str, container: str, dry_run: bool = False, reason: str = "") -> dict[str, Any]:
+        """Pull the latest image and recreate an allowlisted container (through Dockhand). Same Kuma pause/resume
+        and health wait as restart. The previous image reference is returned and audited so it can be rolled back.
+        Check check_updates first, and use dry_run=true to preview."""
+        return await go("update", host, container, dry_run, reason)
 
     @mcp.tool(annotations=ACTION_TOOL)
     async def stop_container(host: str, container: str, dry_run: bool = False, reason: str = "") -> dict[str, Any]:

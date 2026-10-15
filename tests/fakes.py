@@ -14,6 +14,7 @@ class FakeBackend:
         self.fail_action = fail_action
         self.state_after = state_after
         self.state = "running"
+        self.image_id = "sha256:1111111111111111111111"
         self.hosts = [HostInfo("1", "Unraid"), HostInfo("2", "PiZero")]
 
     async def list_hosts(self):
@@ -31,6 +32,7 @@ class FakeBackend:
     async def inspect_container(self, host: str, container: str) -> dict[str, Any]:
         return {
             "Name": "/buffarr",
+            "Image": self.image_id,
             "State": {"Status": self.state},
             "RestartCount": 2,
             "Config": {"Image": "img"},
@@ -43,7 +45,17 @@ class FakeBackend:
         self.events.append(f"backend:{action}")
         if self.fail_action:
             raise BackendError("boom")
+        if action == "update":
+            self.image_id = "sha256:2222222222222222222222"
         self.state = self.state_after
+
+    async def check_updates(self, host: str, *, refresh: bool = False):
+        from mcpmonitor.backends import UpdateInfo
+
+        return [
+            UpdateInfo("buffarr", "img:latest", True, "sha256:aaaa", "sha256:bbbb"),
+            UpdateInfo("dockhand", "dockhand:latest", True, system="dockhand"),
+        ]
 
     async def aclose(self) -> None:
         pass

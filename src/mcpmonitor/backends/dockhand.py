@@ -4,6 +4,10 @@ Routes and shapes were read from Dockhand's source (Finsys/dockhand, src/routes/
 have not yet been exercised against a live instance. Dockhand addresses hosts as numeric "environments"
 (``?env=<id>``); this backend lets callers use the environment name or id interchangeably.
 
+The update route used is ``POST /api/containers/batch-update?env=`` with ``{"containerIds": [...]}`` (it pulls the
+latest image and recreates the container; skips ones labelled ``dockhand.update=false``), and update checks use
+``/api/containers/check-updates`` (GET cached, POST re-check). Both were read from source, not run.
+
 The restart route (``POST /api/containers/{id}/restart?env=``, returns ``{"success": true}``) was read
 directly; start and stop were assumed to share its shape (their route directories exist but were not read).
 
@@ -20,7 +24,7 @@ from typing import Any
 
 import httpx
 
-from .base import BackendError, ContainerSummary, HostInfo, NotFoundError
+from .base import BackendError, ContainerSummary, HostInfo, NotFoundError, UpdateInfo
 
 _ENV_CACHE_SECONDS = 30.0
 
@@ -131,12 +135,75 @@ class DockhandBackend:
         return logs
 
     async def container_action(self, host: str, container: str, action: str) -> None:
+        if action == "update":
+            return await self._update(host, container)
         if action not in ("restart", "start", "stop"):
             raise BackendError(f"Unsupported action {action!r}")
         env = await self._env_id(host)
         data = await self._request("POST", f"/api/containers/{_seg(container)}/{action}", params={"env": env})
         if isinstance(data, dict) and data.get("success") is False:
             raise BackendError(f"Dockhand reported {action} failed: {data.get('error', '')}")
+
+    async def _update(self, host: str, container: str) -> None:
+        """Pull the latest image and recreate, through Dockhand's batch-update route (one container)."""
+        env = await self._env_id(host)
+        ref = container.strip().lstrip("/").lower()
+        match = next(
+            (c for c in await self.list_containers(host) if c.name.lower() == ref or c.id.lower() == ref), None
+        )
+        if match is None:
+            raise NotFoundError(f"no container {container!r} on {host}")
+        data = await self._request(
+            "POST",
+            "/api/containers/batch-update",
+            params={"env": env},
+            json={"containerIds": [match.full_id or match.id]},
+        )
+        results = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(results, list) or not results:
+            raise BackendError("Unexpected batch-update response")
+        r = results[0]
+        error = str(r.get("error", "") or "")
+        if not r.get("success"):
+            raise BackendError(f"update failed: {error or 'unknown error'}")
+        if "skipped" in error.lower():
+            raise BackendError(f"update skipped by Dockhand: {error}")
+
+    async def check_updates(self, host: str, *, refresh: bool = False) -> list[UpdateInfo]:
+        env = await self._env_id(host)
+        if refresh:
+            data = await self._request("POST", "/api/containers/check-updates", params={"env": env})
+            rows = data.get("results") if isinstance(data, dict) else None
+            return [_update(r) for r in rows or [] if isinstance(r, dict) and r.get("hasUpdate")]
+        data = await self._request("GET", "/api/containers/check-updates", params={"env": env})
+        rows = data.get("pendingUpdates") if isinstance(data, dict) else None
+        return [
+            UpdateInfo(
+                container=str(r.get("containerName", "")),
+                image=str(r.get("currentImage", "")),
+                has_update=True,
+            )
+            for r in rows or []
+            if isinstance(r, dict)
+        ]
+
+
+def _update(r: dict[str, Any]) -> UpdateInfo:
+    newer = r.get("newerVersion")
+    return UpdateInfo(
+        container=str(r.get("containerName", "")),
+        image=str(r.get("imageName", "")),
+        has_update=bool(r.get("hasUpdate")),
+        current_digest=str(r.get("currentDigest", "") or "")[:19],
+        new_digest=str(r.get("newDigest", "") or "")[:19],
+        newer_version=str(newer.get("tag") or newer.get("version") or newer)
+        if isinstance(newer, dict)
+        else str(newer or ""),
+        hold_hours=r.get("releaseAgeRemainingHours"),
+        disabled=bool(r.get("updateDisabled")),
+        error=str(r.get("error", "") or ""),
+        system=str(r.get("systemContainer", "") or ""),
+    )
 
 
 def _seg(container: str) -> str:
@@ -174,6 +241,7 @@ def _container(host: str, c: dict[str, Any]) -> ContainerSummary:
     return ContainerSummary(
         host=host,
         id=str(c.get("id", ""))[:12],
+        full_id=str(c.get("id", "")),
         name=str(c.get("name", "")).lstrip("/"),
         image=str(c.get("image", "")),
         state=str(c.get("state", "")),

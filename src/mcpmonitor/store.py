@@ -13,7 +13,7 @@ from typing import Any, TypeVar
 
 T = TypeVar("T")
 
-ACTIONS = ("restart", "start", "stop")
+ACTIONS = ("restart", "start", "stop", "update")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS monitor_map (
@@ -218,7 +218,7 @@ class Store:
     async def count_actions_since(self, host: str, container: str, since: float) -> int:
         def go() -> int:
             row = self._db.execute(
-                "SELECT COUNT(*) AS n FROM audit WHERE tool IN ('restart','start','stop') AND outcome='ok' "
+                "SELECT COUNT(*) AS n FROM audit WHERE tool IN ('restart','start','stop','update') AND outcome='ok' "
                 "AND lower(host)=lower(?) AND lower(container)=lower(?) AND ts>=?",
                 (host, container, since),
             ).fetchone()

@@ -23,6 +23,20 @@ class HostInfo:
 
 
 @dataclass(frozen=True)
+class UpdateInfo:
+    container: str
+    image: str
+    has_update: bool
+    current_digest: str = ""
+    new_digest: str = ""
+    newer_version: str = ""  # advisory newer tag, never applied automatically
+    hold_hours: float | None = None  # release-age cooldown remaining, if Dockhand is holding it
+    disabled: bool = False  # excluded by label
+    error: str = ""
+    system: str = ""  # dockhand | hawser when the container is part of the management stack itself
+
+
+@dataclass(frozen=True)
 class ContainerSummary:
     host: str
     id: str
@@ -31,6 +45,7 @@ class ContainerSummary:
     state: str
     status: str
     health: str = ""
+    full_id: str = ""
     compose_project: str = ""
     ports: list[str] = field(default_factory=list)
     labels: dict[str, str] = field(default_factory=dict)
@@ -48,7 +63,11 @@ class Backend(Protocol):
     async def container_logs(self, host: str, container: str, *, tail: int = 200, since: str | None = None) -> str: ...
 
     async def container_action(self, host: str, container: str, action: str) -> None:
-        """Perform ``restart``, ``start`` or ``stop`` on a container."""
+        """Perform ``restart``, ``start``, ``stop`` or ``update`` (pull the image and recreate) on a container."""
+        ...
+
+    async def check_updates(self, host: str, *, refresh: bool = False) -> list[UpdateInfo]:
+        """Containers with an available image update. ``refresh`` re-checks registries; otherwise cached results."""
         ...
 
     async def aclose(self) -> None: ...

@@ -145,6 +145,9 @@ class ActionService:
                         result.warnings.append(f"could not pause monitor {mname!r}: {exc}")
                 result.monitors_paused = [m[1] for m in paused]
 
+                before = await self._image_ref(host_name, name) if action == "update" else ""
+                if before:
+                    result.notes.append(f"image before update: {before} (re-deploy this image to roll back)")
                 try:
                     await self.backend.container_action(host_name, name, action)
                 except BackendError as exc:
@@ -166,6 +169,13 @@ class ActionService:
                         result.ok = False
                 else:
                     result.final_state = await self._current_state(host_name, name)
+                if action == "update":
+                    after = await self._image_ref(host_name, name)
+                    result.notes.append(f"image after update: {after}")
+                    if before and after == before:
+                        result.notes.append("the image did not change: it was already up to date")
+                    if before:
+                        result.final_state = f"{result.final_state}; was {before}"
                 await self.store.audit(
                     action,
                     "ok" if result.ok else "unsettled",
@@ -205,6 +215,15 @@ class ActionService:
         except KumaError:
             return []
         return [(i, current[i].name) for i in ids if i in current and current[i].active]
+
+    async def _image_ref(self, host: str, name: str) -> str:
+        """Image name and id of a container, for the audit trail and rollback. Best effort."""
+        try:
+            raw = await self.backend.inspect_container(host, name)
+        except BackendError:
+            return ""
+        cfg = raw.get("Config") or {}
+        return f"{cfg.get('Image') or '?'} @ {str(raw.get('Image', ''))[:19] or '?'}"
 
     async def _current_state(self, host: str, name: str) -> str:
         for c in await self.backend.list_containers(host, all=True):

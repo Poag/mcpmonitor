@@ -139,3 +139,40 @@ async def test_unsettled_container_reported():
     assert not res.ok and res.final_state == "restarting"
     assert any("did not settle" in w for w in res.warnings)
     assert events[-1] == "kuma:resume:10"  # still resumed
+
+
+async def test_update_records_previous_image_and_pauses_monitors():
+    events: list[str] = []
+    svc, store, backend, _ = make(events)
+    await store.allow("Unraid", "buffarr", ["update"])
+    await store.set_mapped(10, "buffarr web", [("Unraid", "buffarr")])
+    res = await svc.run("update", "Unraid", "buffarr", reason="monthly")
+    assert events == ["kuma:pause:10", "backend:update", "kuma:resume:10"]
+    assert res.ok
+    assert any("before update" in n and "sha256:111111111111" in n for n in res.notes)
+    assert any("after update" in n and "sha256:222222222222" in n for n in res.notes)
+    audit = (await store.recent_audit())[0]
+    assert audit["tool"] == "update" and "was img" in audit["detail"]
+
+
+async def test_update_noop_is_reported():
+    events: list[str] = []
+    svc, store, backend, _ = make(events)
+    await store.allow("Unraid", "buffarr", ["update"])
+    backend.image_id = "sha256:1111111111111111111111"
+    orig = backend.container_action
+
+    async def same(host, container, action):
+        await orig(host, container, action)
+        backend.image_id = "sha256:1111111111111111111111"
+
+    backend.container_action = same
+    res = await svc.run("update", "Unraid", "buffarr")
+    assert any("already up to date" in n for n in res.notes)
+
+
+async def test_update_needs_its_own_allowlist_entry():
+    svc, store, *_ = make([])
+    await store.allow("Unraid", "buffarr", ["restart"])
+    with pytest.raises(ActionRefused, match="update is not allowed"):
+        await svc.run("update", "Unraid", "buffarr")

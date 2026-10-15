@@ -76,3 +76,70 @@ async def test_unreachable_is_a_backend_error():
     b = DockhandBackend("http://x.test", transport=httpx.MockTransport(boom))
     with pytest.raises(BackendError, match="unreachable"):
         await b.list_hosts()
+
+
+async def test_update_uses_batch_update_with_full_id(make_backend, calls):
+    import json
+
+    def batch(request):
+        body = json.loads(request.content)
+        assert body == {"containerIds": ["a1b2c3d4e5f6a7b8"]}
+        return httpx.Response(200, json={"success": True, "results": [{"containerId": "x", "success": True}]})
+
+    b = make_backend(overrides={"/api/containers/batch-update": batch})
+    await b.container_action("Unraid", "BUFFARR", "update")
+    req = [c for c in calls if c.url.path == "/api/containers/batch-update"][0]
+    assert req.method == "POST" and req.url.params["env"] == "1"
+
+
+@pytest.mark.parametrize(
+    "results,match",
+    [
+        ([{"success": False, "error": "Pull failed: denied"}], "Pull failed"),
+        ([{"success": True, "error": "Skipped (dockhand.update=false)"}], "skipped"),
+        ([], "Unexpected"),
+    ],
+)
+async def test_update_failures_become_backend_errors(make_backend, results, match):
+    b = make_backend(
+        overrides={
+            "/api/containers/batch-update": lambda r: httpx.Response(200, json={"success": False, "results": results})
+        }
+    )
+    with pytest.raises(BackendError, match=match):
+        await b.container_action("Unraid", "buffarr", "update")
+
+
+async def test_update_unknown_container(make_backend):
+    with pytest.raises(NotFoundError):
+        await make_backend().container_action("Unraid", "ghost", "update")
+
+
+async def test_check_updates_refresh_and_cached(make_backend, calls):
+    refreshed = {
+        "total": 2,
+        "updatesFound": 1,
+        "results": [
+            {
+                "containerName": "buffarr",
+                "imageName": "ghcr.io/poag/buffarr:latest",
+                "hasUpdate": True,
+                "currentDigest": "sha256:aaaaaaaaaaaaaaaa",
+                "newDigest": "sha256:bbbbbbbbbbbbbbbb",
+                "newerVersion": {"tag": "1.2.0"},
+            },
+            {"containerName": "plex", "imageName": "plex", "hasUpdate": False},
+        ],
+    }
+    cached = {"environmentId": 1, "pendingUpdates": [{"containerName": "buffarr", "currentImage": "x:latest"}]}
+    b = make_backend(
+        overrides={
+            "/api/containers/check-updates": lambda r: httpx.Response(
+                200, json=refreshed if r.method == "POST" else cached
+            )
+        }
+    )
+    fresh = await b.check_updates("Unraid", refresh=True)
+    assert [(u.container, u.newer_version) for u in fresh] == [("buffarr", "1.2.0")]
+    assert (await b.check_updates("Unraid"))[0].image == "x:latest"
+    assert {c.method for c in calls if c.url.path.endswith("check-updates")} == {"POST", "GET"}
