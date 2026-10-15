@@ -176,9 +176,7 @@ class Store:
 
     async def list_allowed(self) -> list[dict[str, str]]:
         def go() -> list[dict[str, str]]:
-            rows = self._db.execute(
-                "SELECT host, container, actions FROM action_allow ORDER BY host, container"
-            )
+            rows = self._db.execute("SELECT host, container, actions FROM action_allow ORDER BY host, container")
             return [dict(r) for r in rows]
 
         return await self._run(go)

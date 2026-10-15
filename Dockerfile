@@ -18,6 +18,7 @@ RUN pip install . \
 USER mcpm
 VOLUME /data
 EXPOSE 8765
+EXPOSE 5514/udp 5514/tcp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c "import os,urllib.request as u; u.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('MCPM_HTTP_PORT','8765'), timeout=4)" || exit 1

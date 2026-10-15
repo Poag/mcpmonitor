@@ -30,11 +30,9 @@ addopts = "-q"
 anyio_mode = "auto"
 
 [tool.ruff]
-line-length = 110
+line-length = 120
 target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
-
-[tool.ruff.lint.per-file-ignores]
-"src/mcpmonitor/web.py" = ["E501"]  # inline HTML templates
+ignore = ["E501"]  # line length is the formatter's job; long SQL/regex/HTML strings are fine

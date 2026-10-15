@@ -14,9 +14,7 @@ def _tokens(text: str) -> set[str]:
     return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) >= 3 and t not in _STOP}
 
 
-def suggest(
-    monitor: KumaMonitor, containers: list[ContainerSummary], limit: int = 3
-) -> list[ContainerSummary]:
+def suggest(monitor: KumaMonitor, containers: list[ContainerSummary], limit: int = 3) -> list[ContainerSummary]:
     """Containers whose name (or compose project) shares a token with the monitor's name or target."""
     mon = _tokens(monitor.name) | _tokens(monitor.target)
     scored: list[tuple[int, ContainerSummary]] = []

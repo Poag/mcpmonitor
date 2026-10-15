@@ -33,9 +33,7 @@ async def test_list_containers_filters(make_backend, settings):
 async def test_container_logs_filters_redacts_and_labels_untrusted(make_backend, settings):
     logs = "ok\nERROR token=abc123 failed\nok again"
     mcp = build_server(settings, make_backend(logs=logs))
-    res = await mcp.call_tool(
-        "container_logs", {"host": "Unraid", "container": "buffarr", "pattern": "error"}
-    )
+    res = await mcp.call_tool("container_logs", {"host": "Unraid", "container": "buffarr", "pattern": "error"})
     data = payload(res)
     assert data["logs"] == "ERROR token=*** failed"
     assert "untrusted" in data["note"].lower()

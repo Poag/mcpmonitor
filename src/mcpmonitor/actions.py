@@ -114,8 +114,7 @@ class ActionService:
                 detail="rate limit",
             )
             raise ActionRefused(
-                f"rate limit: {used} actions on {name} in the last hour "
-                f"(limit {self.settings.actions_per_hour})"
+                f"rate limit: {used} actions on {name} in the last hour (limit {self.settings.actions_per_hour})"
             )
 
         monitors = await self._active_mapped_monitors(host_name, name)
@@ -226,7 +225,5 @@ class ActionService:
                 await asyncio.sleep(self.settings.settle_grace)
                 return state
             await asyncio.sleep(min(2.0, max(0.05, self.settings.settle_timeout / 20)))
-        result.warnings.append(
-            f"container did not settle within {self.settings.settle_timeout:.0f}s (last: {state})"
-        )
+        result.warnings.append(f"container did not settle within {self.settings.settle_timeout:.0f}s (last: {state})")
         return state

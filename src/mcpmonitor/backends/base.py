@@ -45,9 +45,7 @@ class Backend(Protocol):
 
     async def inspect_container(self, host: str, container: str) -> dict[str, Any]: ...
 
-    async def container_logs(
-        self, host: str, container: str, *, tail: int = 200, since: str | None = None
-    ) -> str: ...
+    async def container_logs(self, host: str, container: str, *, tail: int = 200, since: str | None = None) -> str: ...
 
     async def container_action(self, host: str, container: str, action: str) -> None:
         """Perform ``restart``, ``start`` or ``stop`` on a container."""

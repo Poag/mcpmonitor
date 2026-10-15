@@ -36,6 +36,15 @@ class Settings:
     auth_token: str = ""  # bearer token required on the HTTP transport
     ui_password: str = ""  # enables the web UI at /ui when set (HTTP transport only)
 
+    # Syslog receiver and Unraid ingest (both off unless configured)
+    syslog_port: int = 0  # 0 = disabled
+    syslog_allow: str = ""  # comma-separated sender IPs/CIDRs; required when the receiver is enabled
+    syslog_rate: float = 200.0  # max lines per second per sender
+    syslog_retention_days: int = 14
+    syslog_max_rows: int = 500_000
+    syslog_expect: str = ""  # host:minutes,... hosts that must keep sending
+    ingest_token: str = ""  # bearer token for POST /ingest/unraid; route disabled when empty
+
     # Uptime Kuma (optional)
     kuma_url: str = ""
     kuma_username: str = ""
@@ -59,14 +68,20 @@ class Settings:
         s = cls(
             dockhand_url=os.environ.get("MCPM_DOCKHAND_URL", "").rstrip("/"),
             dockhand_token=os.environ.get("MCPM_DOCKHAND_TOKEN", ""),
-            dockhand_verify_tls=os.environ.get("MCPM_DOCKHAND_VERIFY_TLS", "true").lower()
-            not in ("0", "false", "no"),
+            dockhand_verify_tls=os.environ.get("MCPM_DOCKHAND_VERIFY_TLS", "true").lower() not in ("0", "false", "no"),
             dockhand_timeout=float(os.environ.get("MCPM_DOCKHAND_TIMEOUT", "20")),
             transport=os.environ.get("MCPM_TRANSPORT", "stdio").lower(),
             http_host=os.environ.get("MCPM_HTTP_HOST", "0.0.0.0"),
             http_port=_int("MCPM_HTTP_PORT", 8765),
             auth_token=os.environ.get("MCPM_AUTH_TOKEN", ""),
             ui_password=os.environ.get("MCPM_UI_PASSWORD", ""),
+            syslog_port=_int("MCPM_SYSLOG_PORT", 0),
+            syslog_allow=os.environ.get("MCPM_SYSLOG_ALLOW", ""),
+            syslog_rate=float(os.environ.get("MCPM_SYSLOG_RATE", "200")),
+            syslog_retention_days=_int("MCPM_SYSLOG_RETENTION_DAYS", 14),
+            syslog_max_rows=_int("MCPM_SYSLOG_MAX_ROWS", 500_000),
+            syslog_expect=os.environ.get("MCPM_SYSLOG_EXPECT", ""),
+            ingest_token=os.environ.get("MCPM_INGEST_TOKEN", ""),
             kuma_url=os.environ.get("MCPM_KUMA_URL", "").rstrip("/"),
             kuma_username=os.environ.get("MCPM_KUMA_USERNAME", ""),
             kuma_password=os.environ.get("MCPM_KUMA_PASSWORD", ""),
@@ -81,6 +96,14 @@ class Settings:
         s.validate()
         return s
 
+    def expect_hosts(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for part in self.syslog_expect.split(","):
+            if part.strip():
+                host, _, minutes = part.strip().partition(":")
+                out[host.strip()] = int(minutes or 30)
+        return out
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "mcpmonitor.db"
@@ -90,9 +113,17 @@ class Settings:
             raise ConfigError(f"MCPM_TRANSPORT must be 'stdio' or 'http', got {self.transport!r}")
         if not self.dockhand_url:
             raise ConfigError("MCPM_DOCKHAND_URL is required (e.g. http://10.11.12.3:3003)")
+        if self.syslog_port and not self.syslog_allow.strip():
+            raise ConfigError("MCPM_SYSLOG_ALLOW (sender IPs/CIDRs) is required when MCPM_SYSLOG_PORT is set")
+        if self.syslog_port:
+            from .syslog_server import parse_allow
+
+            try:
+                parse_allow(self.syslog_allow)
+                self.expect_hosts()
+            except ValueError as exc:
+                raise ConfigError(f"invalid syslog setting: {exc}") from exc
         if self.kuma_url and not (self.kuma_username and self.kuma_password):
             raise ConfigError("MCPM_KUMA_USERNAME and MCPM_KUMA_PASSWORD are required with MCPM_KUMA_URL")
         if self.transport == "http" and not self.auth_token:
-            raise ConfigError(
-                "MCPM_AUTH_TOKEN is required for the HTTP transport (refusing to start unauthenticated)"
-            )
+            raise ConfigError("MCPM_AUTH_TOKEN is required for the HTTP transport (refusing to start unauthenticated)")

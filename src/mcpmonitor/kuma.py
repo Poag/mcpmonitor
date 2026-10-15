@@ -126,9 +126,7 @@ def monitor_from_raw(m: dict[str, Any]) -> KumaMonitor:
     if m.get("port") and m.get("hostname"):
         target = f"{m['hostname']}:{m['port']}"
     tags = tuple(
-        f"{t.get('name', '')}:{t.get('value', '')}".rstrip(":")
-        for t in (m.get("tags") or [])
-        if isinstance(t, dict)
+        f"{t.get('name', '')}:{t.get('value', '')}".rstrip(":") for t in (m.get("tags") or []) if isinstance(t, dict)
     )
     return KumaMonitor(
         id=int(m["id"]),

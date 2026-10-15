@@ -81,9 +81,7 @@ async def test_map_ignore_flow(ui):
     assert "buffarr web" in page and "unmapped" in page and "Suggested" in page
     csrf = csrf_of(client)
 
-    r = client.post(
-        "/ui/monitors/10/map", data={"csrf": csrf, "name": "buffarr web", "targets": "Unraid|buffarr"}
-    )
+    r = client.post("/ui/monitors/10/map", data={"csrf": csrf, "name": "buffarr web", "targets": "Unraid|buffarr"})
     assert r.status_code == 303
     r = client.post("/ui/monitors/12/ignore", data={"csrf": csrf, "name": "wan"})
     assert r.status_code == 303
@@ -99,9 +97,7 @@ def test_post_without_csrf_rejected(ui):
     login(client)
     r = client.post("/ui/monitors/10/ignore", data={"name": "x"})
     assert r.status_code == 403
-    r = client.post(
-        "/ui/allowlist/set", data={"csrf": "wrong", "target": "Unraid|buffarr", "actions": "restart"}
-    )
+    r = client.post("/ui/allowlist/set", data={"csrf": "wrong", "target": "Unraid|buffarr", "actions": "restart"})
     assert r.status_code == 403
 
 

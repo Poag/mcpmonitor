@@ -106,9 +106,7 @@ class DockhandBackend:
 
     async def list_containers(self, host: str, *, all: bool = True) -> list[ContainerSummary]:
         env = await self._env_id(host)
-        data = await self._request(
-            "GET", "/api/containers", params={"env": env, "all": "true" if all else "false"}
-        )
+        data = await self._request("GET", "/api/containers", params={"env": env, "all": "true" if all else "false"})
         if not isinstance(data, list):
             raise BackendError("Unexpected /api/containers response")
         host_name = next((h.name for h in await self.list_hosts() if h.id == str(env)), str(env))
@@ -121,9 +119,7 @@ class DockhandBackend:
             raise BackendError("Unexpected inspect response")
         return data
 
-    async def container_logs(
-        self, host: str, container: str, *, tail: int = 200, since: str | None = None
-    ) -> str:
+    async def container_logs(self, host: str, container: str, *, tail: int = 200, since: str | None = None) -> str:
         env = await self._env_id(host)
         params: dict[str, Any] = {"env": env, "tail": tail}
         if since:

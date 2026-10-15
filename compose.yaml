@@ -6,10 +6,22 @@ services:
     container_name: mcpmonitor
     restart: unless-stopped
     ports:
-      - "8765:8765"
+      - "8765:8765"        # MCP endpoint (/mcp), web UI (/ui), Unraid ingest (/ingest/unraid). Keep LAN-only.
+      - "5514:5514/udp"    # syslog receiver; point Unraid's remote syslog at this host
+      - "5514:5514/tcp"
     environment:
       MCPM_DOCKHAND_URL: ${MCPM_DOCKHAND_URL:?set to your Dockhand URL, e.g. http://10.11.12.3:3003}
       MCPM_DOCKHAND_TOKEN: ${MCPM_DOCKHAND_TOKEN:?Dockhand API token (dh_...) for a dedicated user}
       MCPM_AUTH_TOKEN: ${MCPM_AUTH_TOKEN:?bearer token MCP clients must send}
+      MCPM_UI_PASSWORD: ${MCPM_UI_PASSWORD:?password for the web UI}
+      # Optional features (leave empty to keep them off):
+      MCPM_KUMA_URL: ${MCPM_KUMA_URL:-}
+      MCPM_KUMA_USERNAME: ${MCPM_KUMA_USERNAME:-}
+      MCPM_KUMA_PASSWORD: ${MCPM_KUMA_PASSWORD:-}
+      MCPM_ENABLE_ACTIONS: ${MCPM_ENABLE_ACTIONS:-false}
+      MCPM_SYSLOG_PORT: ${MCPM_SYSLOG_PORT:-5514}
+      MCPM_SYSLOG_ALLOW: ${MCPM_SYSLOG_ALLOW:?sender IPs/CIDRs allowed to send syslog, e.g. 10.11.12.5}
+      MCPM_SYSLOG_EXPECT: ${MCPM_SYSLOG_EXPECT:-}
+      MCPM_INGEST_TOKEN: ${MCPM_INGEST_TOKEN:-}
     volumes:
       - ./data:/data

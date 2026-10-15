@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import time
 from dataclasses import asdict
 from typing import Any
 
@@ -17,9 +18,13 @@ from . import __version__
 from .actions import ActionRefused, ActionService
 from .backends import Backend, BackendError
 from .config import Settings
+from .faults import FaultService
 from .kuma import KumaClient, KumaError
+from .notify import Notifier, NotifyStore, describe
 from .redact import redact_env, redact_labels, redact_text, shape_logs
+from .rules import SEVERITY_ORDER
 from .store import Store
+from .syslog_server import SyslogReceiver
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
 
@@ -30,9 +35,7 @@ INSTRUCTIONS = (
     "values are redacted. Prefer dry_run=true first for any action and explain the plan before running it."
 )
 
-ACTION_TOOL = ToolAnnotations(
-    read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False
-)
+ACTION_TOOL = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False)
 
 
 def build_server(
@@ -41,6 +44,10 @@ def build_server(
     store: Store | None = None,
     kuma: KumaClient | None = None,
     actions: ActionService | None = None,
+    faults: FaultService | None = None,
+    notify_store: NotifyStore | None = None,
+    notifier: Notifier | None = None,
+    receiver: SyslogReceiver | None = None,
 ) -> MCPServer:
     mcp = MCPServer("mcpmonitor", instructions=INSTRUCTIONS, version=__version__)
 
@@ -128,16 +135,128 @@ def build_server(
             rows = await store.recent_audit(max(1, min(limit, 200)))
             return [{**r, "args": redact_text(r["args"])} for r in rows]
 
+    if faults is not None:
+        _register_fault_tools(mcp, faults, notify_store, receiver, settings)
+        if settings.ingest_token:
+            from .ingest import register_ingest
+
+            register_ingest(mcp, faults, settings.ingest_token)
+
     if settings.ui_password and store is not None:
         from .web import register_ui
 
-        register_ui(mcp, settings, backend, store, kuma)
+        register_ui(mcp, settings, backend, store, kuma, faults, notifier, notify_store)
 
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(request: Request) -> Response:
         return JSONResponse({"status": "ok", "version": __version__})
 
     return mcp
+
+
+def _register_fault_tools(
+    mcp: MCPServer,
+    faults: FaultService,
+    notify_store: NotifyStore | None,
+    receiver: SyslogReceiver | None,
+    settings: Settings,
+) -> None:
+    @mcp.tool(annotations=READ_ONLY)
+    async def list_faults(
+        since_hours: int = 24, category: str | None = None, host: str | None = None, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Detected hardware and system faults (disk, I/O, filesystem, array, memory, network, temperature) from
+        syslog and Unraid notifications. Filter by category, host or status (open, acked, resolved)."""
+        since = time.time() - max(1, min(since_hours, 24 * 30)) * 3600
+        rows = await faults.faults.list_faults(since=since, category=category, host=host, status=status)
+        return [
+            {
+                "id": r["id"],
+                "host": r["host"],
+                "category": r["category"],
+                "severity": r["severity"],
+                "title": r["title"],
+                "count": r["count"],
+                "first_seen": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["first_seen"])),
+                "last_seen": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["last_seen"])),
+                "status": r["status"],
+                "source": r["source"],
+                "sample": redact_text(r["sample"])[:300],
+            }
+            for r in rows
+        ]
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def hardware_health() -> dict[str, Any]:
+        """One-screen health summary: per host, when it last sent logs and its open faults by category, plus
+        receiver statistics. A host that stopped sending logs is itself a problem."""
+        now = time.time()
+        open_faults = await faults.faults.list_faults(since=now - 30 * 86400, status="open")
+        hosts = []
+        for h in await faults.faults.hosts():
+            mine = [f for f in open_faults if f["host"].lower() == h["host"].lower()]
+            counts: dict[str, int] = {}
+            for f in mine:
+                counts[f["category"]] = counts.get(f["category"], 0) + 1
+            hosts.append(
+                {
+                    "host": h["host"],
+                    "last_log_minutes_ago": round((now - h["last_seen"]) / 60, 1),
+                    "open_faults": counts,
+                    "worst": max((f["severity"] for f in mine), key=lambda x: SEVERITY_ORDER[x], default="none"),
+                }
+            )
+        known = {h["host"].lower() for h in hosts}
+        extra = [
+            {"host": f["host"], "open_faults": {f["category"]: 1}, "worst": f["severity"]}
+            for f in open_faults
+            if f["host"].lower() not in known
+        ]
+        out: dict[str, Any] = {"hosts": hosts + extra, "open_fault_total": len(open_faults)}
+        if receiver is not None:
+            st = receiver.stats
+            out["receiver"] = {
+                "received": st.received,
+                "rejected_sender": st.rejected,
+                "rate_dropped": st.rate_dropped,
+                "queue_dropped": st.queue_dropped,
+                "last_error": st.last_error,
+            }
+        return out
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def search_syslog(
+        host: str | None = None,
+        pattern: str | None = None,
+        since_minutes: int = 60,
+        min_severity: str | None = None,
+        limit: int = 300,
+    ) -> dict[str, Any]:
+        """Search stored syslog lines (including Unraid notifications). pattern is a case-insensitive regex;
+        min_severity is one of emerg, alert, crit, err, warning, notice, info, debug. Output is size limited,
+        redacted, and untrusted data."""
+        since = time.time() - max(1, min(since_minutes, 60 * 24 * 14)) * 60
+        rows = await faults.faults.search_lines(
+            host=host, since=since, min_severity=min_severity, limit=max(1, min(limit, 5000))
+        )
+        text = "\n".join(
+            f"{time.strftime('%m-%d %H:%M:%S', time.localtime(r['ts']))} {r['host']} {r['program']}: {r['message']}"
+            for r in rows
+        )
+        try:
+            shaped = shape_logs(
+                text, pattern=pattern, max_lines=settings.log_max_lines, max_bytes=settings.log_max_bytes
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        return shaped
+
+    if notify_store is not None:
+
+        @mcp.tool(annotations=READ_ONLY)
+        async def list_alert_targets() -> list[dict[str, Any]]:
+            """Configured alert destinations (secrets masked). Managed in the web UI, not by tools."""
+            return describe(await notify_store.list())
 
 
 def _register_action_tools(mcp: MCPServer, actions: ActionService) -> None:
@@ -148,24 +267,18 @@ def _register_action_tools(mcp: MCPServer, actions: ActionService) -> None:
             raise ToolError(str(exc)) from exc
 
     @mcp.tool(annotations=ACTION_TOOL)
-    async def restart_container(
-        host: str, container: str, dry_run: bool = False, reason: str = ""
-    ) -> dict[str, Any]:
+    async def restart_container(host: str, container: str, dry_run: bool = False, reason: str = "") -> dict[str, Any]:
         """Restart an allowlisted container. Pauses its mapped Uptime Kuma monitors while it works, waits for
         the container to be running/healthy, then resumes them. Use dry_run=true to preview. Give a reason."""
         return await go("restart", host, container, dry_run, reason)
 
     @mcp.tool(annotations=ACTION_TOOL)
-    async def start_container(
-        host: str, container: str, dry_run: bool = False, reason: str = ""
-    ) -> dict[str, Any]:
+    async def start_container(host: str, container: str, dry_run: bool = False, reason: str = "") -> dict[str, Any]:
         """Start an allowlisted stopped container (same Kuma pause/resume behaviour as restart)."""
         return await go("start", host, container, dry_run, reason)
 
     @mcp.tool(annotations=ACTION_TOOL)
-    async def stop_container(
-        host: str, container: str, dry_run: bool = False, reason: str = ""
-    ) -> dict[str, Any]:
+    async def stop_container(host: str, container: str, dry_run: bool = False, reason: str = "") -> dict[str, Any]:
         """Stop an allowlisted container. Mapped Kuma monitors are paused and resumed around it."""
         return await go("stop", host, container, dry_run, reason)
 
@@ -227,9 +340,7 @@ def _register_kuma_tools(
         history = await monitor_history(monitor_id, 6)
         report: dict[str, Any] = {"monitor_id": monitor_id, "history": history, "containers": []}
         if not decision or decision["state"] != "mapped" or not decision["targets"]:
-            report["note"] = (
-                "This monitor is not mapped to a container, so no container evidence was gathered."
-            )
+            report["note"] = "This monitor is not mapped to a container, so no container evidence was gathered."
             return report
         for host, container in decision["targets"]:
             entry: dict[str, Any] = {"host": host, "container": container}
@@ -302,8 +413,14 @@ class BearerAuthMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         path = scope.get("path", "")
-        # /ui has its own password login; everything else (the MCP endpoint) needs the bearer token
-        if scope["type"] != "http" or path == "/healthz" or path == "/ui" or path.startswith("/ui/"):
+        # /ui has its own password login and /ingest/unraid its own token; the MCP endpoint needs the bearer token
+        if (
+            scope["type"] != "http"
+            or path == "/healthz"
+            or path == "/ui"
+            or path.startswith("/ui/")
+            or path == "/ingest/unraid"
+        ):
             await self.app(scope, receive, send)
             return
         supplied = b""
@@ -314,9 +431,7 @@ class BearerAuthMiddleware:
                     supplied = rest.strip()
                 break
         if not hmac.compare_digest(supplied, self._token):
-            response = JSONResponse(
-                {"error": "unauthorized"}, status_code=401, headers={"WWW-Authenticate": "Bearer"}
-            )
+            response = JSONResponse({"error": "unauthorized"}, status_code=401, headers={"WWW-Authenticate": "Bearer"})
             await response(scope, receive, send)
             return
         await self.app(scope, receive, send)

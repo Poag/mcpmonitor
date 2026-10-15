@@ -86,7 +86,14 @@ class Auth:
 
 
 def register_ui(
-    mcp: MCPServer, settings: Settings, backend: Backend, store: Store, kuma: KumaClient | None
+    mcp: MCPServer,
+    settings: Settings,
+    backend: Backend,
+    store: Store,
+    kuma: KumaClient | None,
+    faults: Any = None,  # FaultService | None
+    notifier: Any = None,  # Notifier | None
+    notify_store: Any = None,  # NotifyStore | None
 ) -> None:
     auth = Auth(settings.ui_password, settings.auth_token)
 
@@ -102,7 +109,8 @@ def register_ui(
         if cookie:
             nav = (
                 '<nav><a href="/ui">Monitors</a><a href="/ui/allowlist">Allowlist</a>'
-                '<a href="/ui/audit">Audit</a>'
+                '<a href="/ui/faults">Faults</a><a href="/ui/patterns">Log patterns</a>'
+                '<a href="/ui/notify">Alerts</a><a href="/ui/faults">Faults</a><a href="/ui/patterns">Log patterns</a><a href="/ui/notify">Alerts</a><a href="/ui/audit">Audit</a>'
                 f'<form method="post" action="/ui/logout"><input type="hidden" name="csrf" value="{auth.csrf(cookie)}">'
                 "<button>Log out</button></form></nav>"
             )
@@ -309,8 +317,7 @@ def register_ui(
             or "<tr><td colspan=4 class='mut'>Nothing is allowlisted: the agent cannot change any container.</td></tr>"
         )
         options = "".join(
-            f'<option value="{_e(c.host)}|{_e(c.name)}">{_e(c.host)} / {_e(c.name)}</option>'
-            for c in containers
+            f'<option value="{_e(c.host)}|{_e(c.name)}">{_e(c.host)} / {_e(c.name)}</option>' for c in containers
         )
         boxes = " ".join(f"<label><input type=checkbox name=actions value={a}> {a}</label>" for a in ACTIONS)
         add = (
@@ -319,9 +326,7 @@ def register_ui(
         )
         warn = "".join(f'<div class="card warn">{_e(p)}</div>' for p in problems)
         table = f"<table><thead><tr><th>Host</th><th>Container</th><th>Actions</th><th></th></tr></thead><tbody>{rows}</tbody></table>"
-        return page(
-            "Action allowlist", enabled + warn + add + table, cookie, request.query_params.get("msg", "")
-        )
+        return page("Action allowlist", enabled + warn + add + table, cookie, request.query_params.get("msg", ""))
 
     @mcp.custom_route("/ui/allowlist/set", methods=["POST"])
     async def allowlist_set(request: Request) -> Response:
@@ -367,3 +372,242 @@ def register_ui(
         )
         table = f"<table><thead><tr><th>Time</th><th>Tool</th><th>Target</th><th>Outcome</th><th>Detail</th></tr></thead><tbody>{rows}</tbody></table>"
         return page("Audit log", table, cookie)
+
+    # -- faults, learning mode, alert targets ----------------------------------------------------------
+
+    if faults is None:
+        return
+
+    from .notify import describe
+    from .rules import CATEGORIES, SEVERITY_ORDER
+
+    def hidden(csrf: str, **fields: Any) -> str:
+        extra = "".join(f"<input type=hidden name={_e(k)} value='{_e(v)}'>" for k, v in fields.items())
+        return f"<input type=hidden name=csrf value='{csrf}'>{extra}"
+
+    @mcp.custom_route("/ui/faults", methods=["GET"])
+    async def faults_page(request: Request) -> Response:
+        cookie = session(request)
+        if not cookie:
+            return login_redirect()
+        csrf = auth.csrf(cookie)
+        rows = []
+        for f in await faults.faults.list_faults(since=time.time() - 7 * 86400):
+            when = time.strftime("%m-%d %H:%M", time.localtime(f["last_seen"]))
+            btns = "".join(
+                f"<form method=post action='/ui/faults/{f['id']}/{act}' style='display:inline'>{hidden(csrf)}<button>{label}</button></form> "
+                for act, label in (("ack", "Ack"), ("resolve", "Resolve"))
+                if f["status"] == "open" or act == "resolve" and f["status"] == "acked"
+            )
+            rows.append(
+                f"<tr><td>{when}</td><td>{_e(f['host'])}</td><td><span class='tag'>{_e(f['category'])}</span> "
+                f"<b class='{'unmapped' if f['severity'] == 'critical' else ''}'>{_e(f['severity'])}</b></td>"
+                f"<td>{_e(f['title'])} <span class='mut'>x{f['count']} ({_e(f['source'])})</span>"
+                f"<div class='mut'>{_e(f['sample'][:200])}</div></td><td>{_e(f['status'])} {btns}</td></tr>"
+            )
+        table = (
+            "<table><thead><tr><th>Last</th><th>Host</th><th>Kind</th><th>Fault</th><th>Status</th></tr></thead><tbody>"
+            + ("".join(rows) or "<tr><td colspan=5 class=mut>No faults in the last 7 days.</td></tr>")
+            + "</tbody></table>"
+        )
+        hosts = (
+            "".join(
+                f"<tr><td>{_e(h['host'])}</td><td>{time.strftime('%m-%d %H:%M:%S', time.localtime(h['last_seen']))}</td><td>{h['lines']}</td></tr>"
+                for h in await faults.faults.hosts()
+            )
+            or "<tr><td colspan=3 class=mut>No syslog received yet.</td></tr>"
+        )
+        hosts_t = f"<h2>Hosts sending logs</h2><table><thead><tr><th>Host</th><th>Last message</th><th>Lines</th></tr></thead><tbody>{hosts}</tbody></table>"
+        return page("Faults", table + hosts_t, cookie, request.query_params.get("msg", ""))
+
+    for _act, _status in (("ack", "acked"), ("resolve", "resolved")):
+
+        def _make(act: str = _act, status: str = _status) -> None:
+            @mcp.custom_route(f"/ui/faults/{{fault_id:int}}/{act}", methods=["POST"], name=f"fault_{act}")
+            async def fault_status(request: Request) -> Response:
+                data, cookie = await form(request)
+                if data is None:
+                    return login_redirect() if cookie is None else Response("bad csrf token", status_code=403)
+                await faults.faults.set_status(int(request.path_params["fault_id"]), status)
+                return RedirectResponse("/ui/faults", status_code=303)
+
+        _make()
+
+    @mcp.custom_route("/ui/patterns", methods=["GET"])
+    async def patterns_page(request: Request) -> Response:
+        cookie = session(request)
+        if not cookie:
+            return login_redirect()
+        csrf = auth.csrf(cookie)
+        import re as _re
+
+        shown = []
+        for t in await faults.faults.top_templates(60):
+            line = t["sample"] if not t["program"] else f"{t['program']}: {t['sample']}"
+            if faults.engine.matches_any(line):
+                continue
+            shown.append((t, line))
+            if len(shown) >= 40:
+                break
+        rows = []
+        for t, line in shown:
+            guess = _re.sub(r"\d+", r"\\d+", _re.escape(t["sample"][:160]))
+            rows.append(
+                f"<tr><td>{t['count']}</td><td><code>{_e(line[:220])}</code></td><td><details><summary>Make rule</summary>"
+                f"<form method=post action='/ui/rules/preview'>{hidden(csrf)}"
+                f"<p><input name=pattern value='{_e(guess)}' size=60></p>"
+                f"<p><select name=category>{''.join(f'<option>{c}</option>' for c in CATEGORIES)}</select> "
+                f"<select name=severity>{''.join(f'<option>{s_}</option>' for s_ in SEVERITY_ORDER)}</select> "
+                f"threshold <input name=threshold value=1 size=3> in <input name=window value=600 size=5>s</p>"
+                f"<p><input name=title placeholder='Title shown in alerts' size=40></p>"
+                f"<p><button>Preview matches</button></p></form></details></td></tr>"
+            )
+        info = (
+            "<p class='mut'>Most frequent log patterns that no rule matches yet (numbers, addresses and ids collapsed). "
+            "Promote one to a rule after previewing how often it would have matched your stored history.</p>"
+        )
+        table = (
+            "<table><thead><tr><th>Count</th><th>Pattern</th><th></th></tr></thead><tbody>"
+            + (
+                "".join(rows)
+                or "<tr><td colspan=3 class=mut>Nothing yet. Patterns appear once syslog arrives.</td></tr>"
+            )
+            + "</tbody></table>"
+        )
+        custom = await faults.faults.custom_rules()
+        crows = (
+            "".join(
+                f"<tr><td>{_e(r['id'])}</td><td>{_e(r['category'])}/{_e(r['severity'])}</td><td><code>{_e(r['pattern'])}</code></td>"
+                f"<td>{r['threshold']}/{r['window']}s</td><td><form method=post action='/ui/rules/delete'>{hidden(csrf, id=r['id'])}<button>Delete</button></form></td></tr>"
+                for r in custom
+            )
+            or "<tr><td colspan=5 class=mut>No custom rules. The built-in defaults are untested against real logs.</td></tr>"
+        )
+        ctable = f"<h2>Custom rules</h2><table><thead><tr><th>Id</th><th>Kind</th><th>Pattern</th><th>Threshold</th><th></th></tr></thead><tbody>{crows}</tbody></table>"
+        builtin = "".join(
+            f"<tr><td>{_e(r.id)}</td><td>{_e(r.category)}/{_e(r.severity)}</td><td><code>{_e(r.pattern)}</code></td><td>{r.threshold}/{r.window}s</td></tr>"
+            for r in faults.engine.rules
+            if not any(c["id"] == r.id for c in custom)
+        )
+        btable = (
+            f"<details><summary>Built-in rules in effect</summary><table><tbody>{builtin}</tbody></table></details>"
+        )
+        return page("Log patterns", info + table + ctable + btable, cookie, request.query_params.get("msg", ""))
+
+    @mcp.custom_route("/ui/rules/preview", methods=["POST"])
+    async def rules_preview(request: Request) -> Response:
+        data, cookie = await form(request)
+        if data is None:
+            return login_redirect() if cookie is None else Response("bad csrf token", status_code=403)
+        pattern = str(data.get("pattern", ""))
+        try:
+            n, examples = await faults.faults.replay_count(pattern, time.time() - 7 * 86400)
+        except Exception as exc:  # bad regex
+            return page("Preview", f"<p class=unmapped>Invalid pattern: {_e(exc)}</p>", cookie)
+        csrf = auth.csrf(cookie)
+        rid = "custom-" + hashlib.sha256(pattern.encode()).hexdigest()[:8]
+        fields = {k: str(data.get(k, "")) for k in ("pattern", "category", "severity", "threshold", "window", "title")}
+        fields["id"] = rid
+        body = (
+            f"<p>Over the last 7 days this pattern would have matched <b>{n}</b> stored lines.</p>"
+            f"<pre>{_e(chr(10).join(examples)) or 'no examples'}</pre>"
+            f"<form method=post action='/ui/rules/save'>{hidden(csrf, **fields)}<button>Save rule</button></form>"
+            "<p class=mut>A rule that matches thousands of lines will alert constantly; raise the threshold or narrow the pattern first.</p>"
+        )
+        return page("Preview rule", body, cookie)
+
+    @mcp.custom_route("/ui/rules/save", methods=["POST"])
+    async def rules_save(request: Request) -> Response:
+        data, cookie = await form(request)
+        if data is None:
+            return login_redirect() if cookie is None else Response("bad csrf token", status_code=403)
+        try:
+            await faults.faults.save_custom_rule(
+                {
+                    "id": str(data["id"])[:40],
+                    "category": str(data["category"]),
+                    "severity": str(data["severity"]),
+                    "pattern": str(data["pattern"])[:300],
+                    "title": str(data.get("title") or "Custom rule")[:120],
+                    "threshold": max(1, int(str(data.get("threshold") or 1))),
+                    "window": max(1, int(str(data.get("window") or 600))),
+                    "enabled": 1,
+                }
+            )
+            await faults.reload_rules()
+        except (ValueError, KeyError) as exc:
+            return RedirectResponse("/ui/patterns?msg=" + quote(f"Could not save: {exc}"), status_code=303)
+        await store.audit("rule", "ok", detail=f"saved {data['id']}")
+        return RedirectResponse("/ui/patterns?msg=" + quote("Rule saved."), status_code=303)
+
+    @mcp.custom_route("/ui/rules/delete", methods=["POST"])
+    async def rules_delete(request: Request) -> Response:
+        data, cookie = await form(request)
+        if data is None:
+            return login_redirect() if cookie is None else Response("bad csrf token", status_code=403)
+        await faults.faults.delete_custom_rule(str(data.get("id", "")))
+        await faults.reload_rules()
+        return RedirectResponse("/ui/patterns?msg=" + quote("Rule deleted."), status_code=303)
+
+    if notify_store is None:
+        return
+
+    @mcp.custom_route("/ui/notify", methods=["GET"])
+    async def notify_page(request: Request) -> Response:
+        cookie = session(request)
+        if not cookie:
+            return login_redirect()
+        csrf = auth.csrf(cookie)
+        rows = (
+            "".join(
+                f"<tr><td>{_e(t['name'])}</td><td class=mut>{_e(t['target'])}</td><td>{_e(t['min_severity'])}+ {_e(', '.join(t['categories']) or 'all categories')}</td>"
+                f"<td><form method=post action='/ui/notify/test' style='display:inline'>{hidden(csrf, id=t['id'])}<button>Test</button></form> "
+                f"<form method=post action='/ui/notify/remove' style='display:inline'>{hidden(csrf, id=t['id'])}<button>Remove</button></form></td></tr>"
+                for t in describe(await notify_store.list())
+            )
+            or "<tr><td colspan=4 class=mut>No alert targets: faults are recorded but nobody is told.</td></tr>"
+        )
+        cats = " ".join(f"<label><input type=checkbox name=categories value={c}> {c}</label>" for c in CATEGORIES)
+        add = (
+            f"<div class=card><form method=post action='/ui/notify/add'>{hidden(csrf)}"
+            "<p><input name=name placeholder='Name (e.g. Discord)' required> "
+            "<input name=url placeholder='Apprise URL, e.g. discord://webhook_id/webhook_token' size=50 required></p>"
+            f"<p>Minimum severity <select name=min_severity>{''.join(f'<option>{s_}</option>' for s_ in SEVERITY_ORDER)}</select></p>"
+            f"<p class=mut>Only these categories (none ticked = all):</p><p>{cats}</p><p><button>Add or update</button></p></form>"
+            "<p class=mut>The URL contains a secret and is never displayed again. Adding a target with an existing name replaces it.</p></div>"
+        )
+        table = f"<table><thead><tr><th>Name</th><th>Target</th><th>Sends</th><th></th></tr></thead><tbody>{rows}</tbody></table>"
+        return page("Alert targets", add + table, cookie, request.query_params.get("msg", ""))
+
+    @mcp.custom_route("/ui/notify/add", methods=["POST"])
+    async def notify_add(request: Request) -> Response:
+        data, cookie = await form(request)
+        if data is None:
+            return login_redirect() if cookie is None else Response("bad csrf token", status_code=403)
+        try:
+            cats = [c for c in data.getlist("categories") if c in CATEGORIES]
+            await notify_store.add(
+                str(data.get("name", "")), str(data.get("url", "")), str(data.get("min_severity", "warning")), cats
+            )
+        except ValueError as exc:
+            return RedirectResponse("/ui/notify?msg=" + quote(str(exc)), status_code=303)
+        await store.audit("notify-target", "ok", detail=f"saved {str(data.get('name', ''))[:60]}")
+        return RedirectResponse("/ui/notify?msg=" + quote("Saved. Use Test to check it works."), status_code=303)
+
+    @mcp.custom_route("/ui/notify/remove", methods=["POST"])
+    async def notify_remove(request: Request) -> Response:
+        data, cookie = await form(request)
+        if data is None:
+            return login_redirect() if cookie is None else Response("bad csrf token", status_code=403)
+        await notify_store.remove(int(str(data.get("id", "0"))))
+        return RedirectResponse("/ui/notify?msg=" + quote("Removed."), status_code=303)
+
+    @mcp.custom_route("/ui/notify/test", methods=["POST"])
+    async def notify_test(request: Request) -> Response:
+        data, cookie = await form(request)
+        if data is None:
+            return login_redirect() if cookie is None else Response("bad csrf token", status_code=403)
+        ok = await notifier.test(int(str(data.get("id", "0"))))
+        return RedirectResponse(
+            "/ui/notify?msg=" + quote("Test sent." if ok else "Test FAILED: check the URL."), status_code=303
+        )

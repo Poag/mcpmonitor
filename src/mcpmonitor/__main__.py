@@ -9,9 +9,14 @@ import sys
 from .actions import ActionService
 from .backends.dockhand import DockhandBackend
 from .config import ConfigError, Settings
+from .faults import FaultService, FaultStore
+from .ingest import watchdog
 from .kuma import UptimeKumaClient
+from .notify import Notifier, NotifyStore
+from .rules import RuleEngine
 from .server import build_http_app, build_server
 from .store import Store
+from .syslog_server import SyslogReceiver, parse_allow
 
 
 async def _run(settings: Settings) -> None:
@@ -28,8 +33,30 @@ async def _run(settings: Settings) -> None:
         else None
     )
     actions = ActionService(settings, backend, store, kuma)
-    mcp = build_server(settings, backend, store, kuma, actions)
+
+    fault_store = FaultStore(store)
+    notify_store = NotifyStore(store)
+    notifier = Notifier(notify_store, store)
+    fault_service = FaultService(fault_store, RuleEngine(), notifier)
+    await fault_service.reload_rules()
+    receiver = (
+        SyslogReceiver(
+            fault_service,
+            parse_allow(settings.syslog_allow),
+            port=settings.syslog_port,
+            rate_per_sec=settings.syslog_rate,
+        )
+        if settings.syslog_port
+        else None
+    )
+    mcp = build_server(settings, backend, store, kuma, actions, fault_service, notify_store, notifier, receiver)
+    background: list[asyncio.Task] = []
     try:
+        if receiver is not None:
+            await receiver.start()
+            background.append(asyncio.create_task(_prune_loop(fault_store, settings)))
+        if settings.expect_hosts():
+            background.append(asyncio.create_task(watchdog(fault_service, settings.expect_hosts())))
         resumed = await actions.reconcile()
         if resumed:
             logging.getLogger("mcpmonitor").warning("resumed %d Kuma monitor(s) left paused", len(resumed))
@@ -42,10 +69,23 @@ async def _run(settings: Settings) -> None:
             config = uvicorn.Config(app, host=settings.http_host, port=settings.http_port, log_level="info")
             await uvicorn.Server(config).serve()
     finally:
+        for task in background:
+            task.cancel()
+        if receiver is not None:
+            await receiver.stop()
         await backend.aclose()
         if kuma is not None:
             await kuma.aclose()
         store.close()
+
+
+async def _prune_loop(faults: FaultStore, settings: Settings) -> None:
+    while True:
+        try:
+            await faults.prune(settings.syslog_retention_days, settings.syslog_max_rows)
+        except Exception:
+            logging.getLogger("mcpmonitor").exception("syslog prune failed")
+        await asyncio.sleep(3600)
 
 
 def main() -> None:
